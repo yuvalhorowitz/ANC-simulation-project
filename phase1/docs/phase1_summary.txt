@@ -1,0 +1,148 @@
+
+PHASE 1 – BASELINE ANC EXPERIMENTS (SUMMARY)
+
+Overview
+--------
+Phase 1 aimed to establish baseline understanding of Active Noise Control using:
+1. Pyroomacoustics simulation (single noise source, no control)
+2. A Temporal Convolutional Network (TCN) trained to map reference mic → error mic
+3. Evaluation of “anti-noise” by inverting TCN predictions
+4. Multiple noise types: engine, air conditioner, drilling, horn
+5. A first attempt to compute an offline “ideal control” from secondary path alone
+
+This phase provides the empirical and conceptual foundation for Phase 2.
+
+------------------------------------------------------------
+1. Pyroomacoustics Simulation Configuration (Phase 1)
+------------------------------------------------------------
+
+Room:
+- Dimensions: 4m × 3m × 2m
+- RT60 ≈ 0.3s (default reflective walls)
+- Sampling rate: 16 kHz
+- Reflection order: 3 (ShoeBox)
+
+Noise sources:
+- Engine idling
+- Air conditioner hum
+- Drilling noise
+- Car horn tone
+- Duration: 4 seconds
+- Normalized amplitude
+- Randomized 3D source position
+
+Microphones:
+Reference mic:
+- Randomly placed around (1.2, 0.5, 1.0)
+
+Error (driver) mic:
+- Randomly placed around (3.0, 2.5, 1.0)
+
+Saved per scenario:
+- *_ref.wav — reference microphone signal
+- *_err.wav — error microphone signal
+
+------------------------------------------------------------
+2. Phase 1 TCN Model – Learning ref → err Mapping
+------------------------------------------------------------
+
+Architecture:
+- Input: 200-sample window (12.5 ms)
+- Temporal Convolutional Network (TCN):
+  - Causal convolutions
+  - Dilations: 1 → 2 → 4
+  - Filters: 32 → 32 → 64
+  - BatchNorm after each conv
+- Dense layer: 32 units → final output sample
+- Optimizer: AdamW (LR = 0.005 with decay)
+- Loss: MSE predicting err[t]
+
+Training:
+- Dataset built from sliding windows across 4s waveforms
+- ~80/20 split
+- ~10 epochs typical
+- Model learns noise structure well in simple scenarios
+
+------------------------------------------------------------
+3. TCN Cancellation Attempt
+------------------------------------------------------------
+
+Procedure:
+1. Predict error mic: err_pred(t)
+2. Anti-noise = –err_pred(t)
+3. Combine at ear: combined(t) = err(t) + anti(t)
+4. Evaluate:
+   - MSE_before = mean(err²)
+   - MSE_after = mean(combined²)
+   - ΔE (dB) = 10 log10(MSE_before/MSE_after)
+
+------------------------------------------------------------
+4. Quantitative Results
+------------------------------------------------------------
+
+Simple condition (engine-only, low reflections):
+------------------------------------------------------------
+Per-scenario:
+- +1.24 dB
+- +8.92 dB
+- +5.68 dB
+
+Aggregate (easy dataset):
+- Average reduction: **+5.28 dB**
+- Std: **3.15 dB**
+
+Interpretation:
+- TCN can predict error signal accurately enough to cancel
+  **when conditions are simple and highly predictable.**
+
+Realistic condition (mixed noise, reflections):
+------------------------------------------------------------
+- Typical: **–1.16 dB** (worse than baseline)
+
+Interpretation:
+- When the environment has reflections and mixed noise,
+  error ≠ delayed/invertible reference.
+- TCN has no knowledge of secondary path.
+- So predicting –err does **not** give meaningful ANC.
+
+------------------------------------------------------------
+5. Attempted “Ideal” Control from Secondary Path Only
+------------------------------------------------------------
+
+Approach 1: Frequency-domain deconvolution
+- Unstable
+- Negative cancellation: –1.86 dB
+
+Approach 2: Time-domain least squares control
+- Finite FIR control filter
+- Result: +0.01 dB (negligible improvement)
+
+Conclusion:
+- Offline inversion of secondary path is ill-conditioned.
+- One static filter cannot cancel a 4-second dynamic noise waveform.
+- This validates that **ANC requires dynamic control tied to reference input**, not a global waveform.
+
+------------------------------------------------------------
+6. Phase 1 Conclusions
+------------------------------------------------------------
+
+Findings:
+- ref→err TCN mapping works only in simple acoustic environments.
+- In realistic simulation, this mapping fails to produce useful ANC.
+- Analytical or LS-based ideal control also fails due to the non-minimum-phase, long-delay secondary path.
+
+Key Insight for Phase 2:
+------------------------------------------------------------
+**A functional ANC controller must incorporate the secondary-path RIR directly in the training loss and must output a control signal u(t) conditioned on the reference mic.**
+
+Next Phase:
+- Build a TCN that outputs control u(t)
+- Convolve with fixed secondary-path RIR h_s
+- Compute residual = err + (u * h_s)
+- Train to minimize residual
+
+This is the foundation of Phase 2.
+
+------------------------------------------------------------
+End of Phase 1 Summary
+------------------------------------------------------------

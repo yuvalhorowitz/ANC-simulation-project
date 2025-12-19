@@ -1,0 +1,212 @@
+
+MODEL TRAINING, VALIDATION, AND TESTING – EXPLANATION
+======================================================
+
+This document explains clearly and systematically:
+
+1. How the dataset is generated  
+2. How training samples are created  
+3. How the TCN model is trained  
+4. How validation is performed  
+5. How testing is done (cancellation evaluation)  
+6. What metrics are used  
+7. Why these steps match ANC theory  
+
+It is written at a level suitable for inclusion in the project work plan.  
+
+
+======================================================
+1. DATA GENERATION PIPELINE
+======================================================
+
+We generate data using **Pyroomacoustics**, simulating a realistic 
+3D environment (a simplified car cabin).
+
+For every scenario:
+
+Inputs:
+- A noise source (engine, air conditioner, drilling, horn)
+- Randomized source position
+- Reference microphone position (near dashboard)
+- Error microphone position (driver’s ear)
+- Secondary path: speaker → error mic RIR
+
+Files generated:
+- ref.wav               (reference microphone signal)
+- err.wav               (error microphone signal)
+- rir_src_to_ref.npy    (source → reference path)
+- rir_src_to_err.npy    (source → error path)
+- rir_spk_to_err.npy    (speaker → error path)
+
+Duration: 4 seconds  
+Sample rate: 16 kHz  
+
+
+======================================================
+2. PREPARING TRAINING DATA
+======================================================
+
+We use sliding windows to create training samples.
+
+Example:
+- Window length = 200 samples
+- Target = error_mic[t]
+
+Each training example consists of:
+
+Input:
+    ref[t-200 : t]
+
+Target:
+    err[t]
+
+These windows are extracted from all training scenarios, giving tens of 
+thousands of (input, target) pairs.
+
+Why this works:
+- The reference mic contains an earlier version of the noise  
+- The TCN learns the mapping from the reference signal to the error signal  
+- This is equivalent to modeling the primary path from reference → error  
+
+
+======================================================
+3. MODEL TRAINING PROCEDURE
+======================================================
+
+The model is trained to **predict the noise** at the error microphone.
+
+Process:
+- Loss = MSE(predicted_error, true_error)
+- Optimizer = AdamW with learning rate decay
+- Batch size = ~32
+- Epochs = 5–10
+- Causal convolutions ensure no future leakage
+
+During training, the model learns:
+- Temporal structure of noise
+- Harmonic content (engine, drilling)
+- Relationship between ref and err
+- Short-term and long-term dependencies
+- Room reflections (delays introduced by RIRs)
+
+Training is iterative:
+- For each batch:
+  - Forward pass: predict error signal
+  - Backward pass: update convolution filters
+  - Over time, predictions become more accurate
+
+This is purely supervised learning.  
+
+
+======================================================
+4. VALIDATION PROCEDURE
+======================================================
+
+Validation uses a held-out portion of the dataset (20%).
+
+The validation data:
+- same type of signals
+- same room acoustics
+- but different random start points
+
+Key metric:
+    validation MSE (predictive accuracy)
+
+Why validation matters:
+- It detects overfitting
+- Ensures the TCN generalizes to unseen noise segments
+- Confirms the model is not memorizing the waveforms  
+
+
+======================================================
+5. TESTING PROCEDURE (ANC SIMULATION)
+======================================================
+
+Testing evaluates the *actual ANC cancellation ability*.
+
+Steps:
+1. Load unseen scenario (ref.wav, err.wav)
+2. Predict error signal:
+       err_pred[t]
+3. Generate anti-noise:
+       anti[t] = –err_pred[t]
+4. Combine signals:
+       combined[t] = err[t] + anti[t]
+
+5. Compute:
+   - MSE_before = mean(err²)
+   - MSE_after = mean(combined²)
+   - Energy Reduction:
+         ΔE = 10 log10(MSE_before / MSE_after)
+
+6. Optional:
+   Listen to the three audio files:
+   - Original error signal  
+   - Predicted inverted signal  
+   - Combined residual noise  
+
+This mimics real-world feedforward ANC:
+- Predict disturbance signal
+- Invert phase
+- Add to error microphone  
+
+This is **not the final ANC system**, but establishes a baseline.  
+
+
+======================================================
+6. METRICS USED
+======================================================
+
+1. **Prediction MSE**
+   - Measures how accurate the TCN’s error prediction is  
+
+2. **Cancellation MSE**
+   - Measures residual noise after adding anti-noise  
+
+3. **Energy Reduction (dB)**
+   - The standard ANC performance metric  
+   - Positive dB = improvement  
+   - Negative dB = system made it worse  
+
+4. **Per-scenario results**
+   - Evaluated separately for each validation scenario  
+
+5. **Aggregate results**
+   - Mean and Std across all scenarios  
+   - Gives overall cancellation performance  
+
+
+======================================================
+7. WHY THIS PROCESS MATCHES ANC THEORY
+======================================================
+
+Traditional ANC relies on:
+- A reference sensor  
+- A controller  
+- A secondary path  
+- An error microphone  
+- An optimization criterion (minimize residual noise)
+
+In Phase 1 we model the *primary path* (reference → error).
+
+ANC theory states:
+    If the noise is predictable and the secondary path is simple,
+    anti-noise = –predicted_error ideally cancels the disturbance.
+
+Phase 1 results confirm this:
+- In simple acoustic conditions → good cancellation
+- In realistic car-like room → cancellation fails
+
+This reveals the need for Phase 2:
+- Controller must generate control signal u(t)
+- Must be trained with secondary-path RIR integrated into loss
+- Must optimize residual noise directly, not error prediction
+
+Thus Phase 1 training/validation/testing is a baseline step that
+demonstrates the limits of naive ANC and motivates the design of a true
+ANC controller.
+
+
+======================================================
+END OF DOCUMENT
+======================================================

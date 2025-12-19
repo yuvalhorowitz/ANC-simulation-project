@@ -1,0 +1,243 @@
+
+THEORY OF TEMPORAL CONVOLUTIONAL NETWORKS (TCNs)
+=================================================
+
+This document explains:
+1. What a Temporal Convolutional Network (TCN) is  
+2. How it works internally  
+3. Why it is well‑suited for Active Noise Control (ANC)  
+4. How it compares to other neural architectures  
+5. Why we selected it specifically for this project  
+
+It is written to be understandable even without a deep ML background.
+
+
+-----------------------------------------------------------
+1. INTRODUCTION TO TCNs
+-----------------------------------------------------------
+
+A Temporal Convolutional Network (TCN) is a neural network designed
+specifically for **sequential, time‑dependent data** such as audio,
+vibration signals, and time series.
+
+While recurrent networks (LSTM, GRU) process samples one at a time,
+TCNs process them using **1D convolutions over time**, making them:
+
+- Faster  
+- More stable  
+- Easier to train  
+- Better for real‑time systems  
+
+TCNs became popular after the paper:
+
+  *“An Empirical Evaluation of Generic Convolutional and Recurrent Networks
+   for Sequence Modeling” — Bai, Kolter, Koltun (2018)*
+
+
+-----------------------------------------------------------
+2. KEY PROPERTIES OF TCNs
+-----------------------------------------------------------
+
+TCNs have three defining features:
+
+-----------------------------------------------------------
+(A) **Causal Convolutions**
+-----------------------------------------------------------
+A causal convolution ensures:
+- Output at time *t* depends only on input samples at or before time *t*.
+- No “future information leaks back”.
+
+This is essential for **Active Noise Control**, because the controller
+must work in **real time**.
+
+-----------------------------------------------------------
+(B) **Dilated Convolutions**
+-----------------------------------------------------------
+Dilations make filters “skip” samples:
+
+- dilation=1 → sees [t‑1, t‑2]  
+- dilation=2 → sees [t‑2, t‑4]  
+- dilation=4 → sees [t‑4, t‑8]  
+
+This exponentially expands the network’s **temporal receptive field**.
+
+Why this matters for ANC:
+- Sound takes time to travel inside the car cabin (secondary path)
+- Reflections create delayed echoes
+- Engine / road noise has periodic structure over long times
+- The TCN can learn long‑term dependencies with very few layers
+
+-----------------------------------------------------------
+(C) **Stacked Convolution Blocks**
+-----------------------------------------------------------
+Layers are stacked so that higher layers can learn more global patterns.
+
+Lower layers:
+- model sharp waveform details
+
+Higher layers:
+- model long-term harmonics and amplitude modulations
+
+This hierarchical structure makes TCNs excellent at capturing audio
+patterns.
+
+
+-----------------------------------------------------------
+3. HOW A TCN WORKS INTERNALLY
+-----------------------------------------------------------
+
+A TCN processes audio in sliding time windows (e.g., 200 samples).
+
+Example layer:
+- 32 filters
+- kernel_size=2
+
+Each filter is a small vector like:
+
+    [w1, w2]
+
+The filter “slides” over the waveform and extracts specific temporal
+patterns.
+
+Think of the filters as:
+- feature detectors  
+- FIR filters that learn useful transformations  
+- pattern recognizers for different frequencies / shapes  
+
+Stacking multiple dilated layers lets the TCN learn:
+- short-term waveform structures  
+- mid-term modulations  
+- long-term periodicities  
+
+This is very similar to how the human auditory system processes sound.
+
+
+-----------------------------------------------------------
+4. WHY TCNs ARE ESPECIALLY GOOD FOR ANC
+-----------------------------------------------------------
+
+Active Noise Control requires:
+- predicting the noise arriving at the error microphone  
+- generating an anti‑noise waveform with correct phase and timing  
+- adapting to delays and reflections  
+- running in real time  
+
+TCNs satisfy all these requirements:
+
+### ✔ Causality
+Outputs depend only on past samples → real‑time friendly.
+
+### ✔ Good at waveform prediction
+ANC requires predicting the upcoming noise waveform.
+TCNs excel at fine-grained audio modeling.
+
+### ✔ Handles long delays
+Dilations give access to long history automatically, crucial for:
+- acoustic propagation delay
+- secondary-path echo patterns
+
+### ✔ Low latency and fast inference
+Convolution is extremely fast on modern processors.
+
+### ✔ Comparable to adaptive FIR filters
+Traditional ANC uses FxLMS on FIR filters.
+A TCN is like a **large, learnable, nonlinear FIR bank**:
+- more expressive  
+- more adaptive  
+- better suited for real-world noise  
+
+
+-----------------------------------------------------------
+5. HOW TCN COMPARES TO OTHER MODELS
+-----------------------------------------------------------
+
+### TCN vs LSTM (recurrent networks)
+- TCN is faster  
+- more stable  
+- easier to train  
+- handles long sequences better  
+- no vanishing/exploding gradients  
+
+### TCN vs Transformers
+Transformers:
+- need huge datasets  
+- are expensive to run  
+- introduce latency  
+- are not naturally causal (need masking)
+
+Not suitable for real-time ANC.
+
+### TCN vs Classical FIR + FxLMS
+FIR filter:
+- linear  
+- limited expressive power  
+- adapts slowly if noise changes
+
+TCN:
+- nonlinear  
+- learns many filters simultaneously  
+- captures complex noise and reflections  
+
+
+-----------------------------------------------------------
+6. WHY WE SELECTED TCN FOR THIS PROJECT
+-----------------------------------------------------------
+
+We chose TCN because:
+
+### ✔ It is real-time capable (causal)
+ANC requires sample-by-sample, real-time response.
+
+### ✔ It handles long acoustic delays
+Dilated convolutions provide long receptive fields.
+
+### ✔ It learns frequency and phase structure well
+Ideal for engine hum, road noise, and periodic urban noise.
+
+### ✔ It behaves like a smarter FIR ANC filter
+The TCN effectively generalizes:
+    adaptive FIR → learned convolutional filter bank
+
+### ✔ It performed well in Phase 1
+In simple acoustics:
+- the TCN achieved +5.28 dB average cancellation  
+- validating its ability to model noise and generate anti-noise  
+
+### ✔ It integrates naturally into Phase 2
+Phase 2 requires:
+- producing control signals u(t)  
+- convolving with secondary-path RIR  
+- minimizing residual at ear  
+
+TCN can do exactly this:
+- learn mapping ref → u  
+- include secondary-path convolution inside the loss  
+- optimize end-to-end  
+
+
+-----------------------------------------------------------
+7. SUMMARY
+-----------------------------------------------------------
+
+TCNs are:
+- causal  
+- fast  
+- stable  
+- excellent for real-time audio  
+- good at modeling long-term temporal structure  
+- ideal for ANC system design  
+
+For this project, TCNs provide the best balance between:
+- accuracy  
+- speed  
+- latency  
+- interpretability  
+- compatibility with ANC theory  
+
+They form the foundation for Phase 2, where the model will output
+control signals and learn to cancel noise directly at the error
+microphone using the known secondary path.
+
+-----------------------------------------------------------
+END OF DOCUMENT
+-----------------------------------------------------------
