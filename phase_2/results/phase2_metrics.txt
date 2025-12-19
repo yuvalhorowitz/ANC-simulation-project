@@ -1,0 +1,13 @@
+Loaded 3 validation scenarios.
+
+[00] val_scenario_000 | dE_full=1.53 dB | Engine=1.87 dB | Road=1.73 dB | Cabin=1.41 dB
+[01] val_scenario_001 | dE_full=3.42 dB | Engine=4.52 dB | Road=3.69 dB | Cabin=3.55 dB
+[02] val_scenario_002 | dE_full=3.34 dB | Engine=4.48 dB | Road=3.61 dB | Cabin=3.46 dB
+
+=== Aggregate over validation set ===
+        mse_before: mean=  0.19 | std=  0.01
+         mse_after: mean=  0.10 | std=  0.03
+        delta_full: mean=  2.76 | std=  0.88
+     engine_50_400: mean=  3.62 | std=  1.24
+      road_20_2000: mean=  3.01 | std=  0.90
+      cabin_0_1000: mean=  2.81 | std=  0.99

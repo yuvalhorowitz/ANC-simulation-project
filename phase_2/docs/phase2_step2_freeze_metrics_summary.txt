@@ -1,0 +1,158 @@
+PHASE 2 — STEP 2 (FREEZE METRICS) SUMMARY
+========================================
+Date: 2025-12-14 (Asia/Jerusalem)
+
+Purpose of Step 2
+-----------------
+Step 2’s purpose is to “freeze” an objective, repeatable evaluation of the Phase‑2 controller
+so that:
+1) we can compare results against the quantitative project goals,
+2) we can track improvements/regressions across future changes (e.g., Phase 3/GUI),
+3) we can avoid subjective “it sounds better” decisions.
+
+In our Phase‑2 design (Option D), the trained TCN does NOT output anti‑noise directly.
+It outputs a control signal u(t) that is played through the speaker, and only then affects the
+driver’s ear (error mic) through the secondary path h_s (speaker→ear RIR). Therefore, our metric
+must be computed on the residual at the error microphone.
+
+Where this step runs
+--------------------
+Script used for Step 2:
+  phase_2/testing/test_ref2u.py
+
+This script:
+- Loads the “locked” Phase‑2 model weights (MODEL_PATH in the script).
+- Iterates over all validation scenarios under VAL_DIR (data/val).
+- For each scenario, computes residual error after applying the predicted control through h_s.
+- Reports both full‑band and band‑limited reduction metrics required by the PDF.
+
+Files and signals per scenario (what we evaluate)
+-------------------------------------------------
+Each validation scenario is stored as a prefix (e.g., data/val/val_scenario_000) and includes:
+1) *_ref.wav
+   Reference microphone signal (x[n]).
+   This is the controller input: the “early” measurement correlated with the disturbance.
+2) *_err.wav
+   Error microphone signal (d[n]) at the driver’s ear WITHOUT control.
+   This is what we want to minimize after applying control.
+3) *_rir_spk_to_err.npy
+   Secondary path impulse response h_s[n] (speaker → error mic).
+   This is the “plant” that maps control u[n] to the control contribution y[n] at the ear.
+
+Step‑2 evaluation flow (exact pipeline)
+---------------------------------------
+For each validation scenario:
+
+(1) Load aligned training-example tensors
+    test_ref2u.py calls:
+      build_training_example(scenario_prefix, fs=FS, window_length=WINDOW_LENGTH)
+
+    It returns:
+      X     : input windows built from ref.wav (shape: [N, WINDOW_LENGTH, 1])
+      err_t : target aligned with X (shape: [N, 1]) representing the error-mic samples d[n]
+      h_s   : secondary-path RIR from *_rir_spk_to_err.npy (shape: [L])
+
+    Important: alignment matters.
+    The code ensures err_t corresponds sample-by-sample to the time index of each ref window,
+    so that residual calculation uses consistent timing.
+
+(2) Predict control signal u[n]
+    u = model.predict(X).flatten()
+
+    Interpretation:
+    u[n] is the controller output that would be sent to the speaker.
+
+(3) Apply the secondary path (speaker→ear)
+    y_ctrl = fftconvolve(u, h_s, mode="same")
+
+    Interpretation:
+    y_ctrl[n] is the sound at the driver’s ear caused by the speaker playing u[n].
+
+(4) Compute residual at the error mic (post‑control)
+    err = err_t.flatten()[:len(y_ctrl)]
+    residual = err + y_ctrl
+
+    Note on sign:
+    The training/test convention here is “residual = disturbance + control_contribution”.
+    If y_ctrl is learned to be opposite phase in the right band, residual energy decreases.
+
+(5) Compute the frozen metrics
+    Full-band energy (time-domain):
+      MSE_before = mean(err^2)
+      MSE_after  = mean(residual^2)
+      dE_full    = 10*log10(MSE_before / MSE_after)
+
+    Band-limited energy (frequency-domain via FFT), per PDF requirements:
+      Engine band: 50–400 Hz
+      Road band  : 20–2000 Hz
+      Cabin band : 0–1000 Hz
+    For each band:
+      E_before = sum(|FFT(err)|^2 over band)
+      E_after  = sum(|FFT(residual)|^2 over band)
+      dE_band  = 10*log10(E_before / E_after)
+
+    Output is printed per scenario and then aggregated (mean/std) across the whole val set.
+
+Thought process behind Step 2 (why this is the right metric)
+------------------------------------------------------------
+- The project goal is noise reduction “at the driver/passenger” (error mic), not at the speaker input.
+- In ANC, the controller must be judged by the final residual at the error sensor.
+- A controller can look good in “u-space” but still fail after passing through h_s.
+  That’s why Step 2 explicitly filters u through h_s and measures residual.
+
+- Band-limited evaluation is mandatory because the project goals are defined by frequency ranges.
+  Broadband MSE alone can hide poor performance in the most important band (engine 50–400 Hz).
+
+How Step 2 maps to project quantitative goals (from the PDF)
+------------------------------------------------------------
+Noise reduction targets (measured in dB as 10*log10(P_before / P_after)):
+- Engine noise (50–400 Hz): at least 15 dB reduction (central target).
+- Road noise (20–2000 Hz): up to 10 dB reduction.
+- Cabin / AC noise (<=1000 Hz): up to 10 dB reduction.
+
+Memory footprint target:
+- RAM footprint <= 150 MB (model + buffers) during operation.
+  Step 2 does not measure RAM yet; it produces the performance baseline that will later be
+  paired with RAM/timing measurements.
+
+Accuracy vs “ideal anti-noise” target:
+- Target: MSE <= 0.001 for normalized signals when comparing TCN output vs ideal anti-noise.
+  Note: Step 2 primarily evaluates residual reduction at the ear (post secondary path). The “ideal”
+  anti-noise comparison is a separate analysis and can be added as an extra report item, but the
+  primary system KPI remains residual reduction at the error mic.
+
+What Step 2 produces as “frozen artifacts”
+------------------------------------------
+Step 2 should output (and we store) two things:
+
+A) A text log of metrics (redirect stdout to a file)
+   Example command (Windows):
+     python -m phase_2.testing.test_ref2u > phase_2/results/phase2_metrics.txt
+
+   (Important: keep prints ASCII-only to avoid Windows cp1252 redirect issues.)
+
+B) Per-scenario audio outputs for listening sanity checks
+   test_ref2u.py writes to:
+     phase_2/testing/audio_outputs/
+   Files per scenario:
+     <tag>_err_before.wav   (error mic before ANC)
+     <tag>_ctrl_at_ear.wav  (speaker contribution at ear)
+     <tag>_err_after.wav    (residual after ANC)
+
+How to interpret Step 2 results relative to goals
+-------------------------------------------------
+- If dE_engine (50–400 Hz) is below 15 dB:
+  we are not yet meeting the main engine-band cancellation requirement, even if broadband looks good.
+- If dE_road and dE_cabin are reasonable but engine is low:
+  the controller is not prioritizing the engine band sufficiently (consider weighted loss, training data
+  that emphasizes engine harmonics, or multi-mic/multi-speaker extensions).
+- If residual audio has “squeaky/tonal” artifacts:
+  it often indicates the controller is injecting energy in an unintended band. This is why we keep
+  both band metrics and audio artifacts.
+
+Status at the end of Step 2
+---------------------------
+Step 2 is considered complete when:
+1) We can run test_ref2u.py on the locked model without errors,
+2) We obtain per-scenario + aggregate metrics (full-band + band-limited),
+3) We save the metrics log and the before/after audio files for traceability.
