@@ -1,0 +1,25 @@
+{
+  "experiment_id": "exp_00_baseline",
+  "description": "Baseline: TCN [32,32,64], dil [1,2,4], w=200, MSE loss",
+  "model": {
+    "name": "tcn_baseline",
+    "filters": [
+      32,
+      32,
+      64
+    ],
+    "dilations": [
+      1,
+      2,
+      4
+    ],
+    "sequence_length": 200,
+    "dense_units": 32
+  },
+  "training": {
+    "epochs": 10,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-05
+  },
+  "final_val_loss": 0.07713334765285254
+}

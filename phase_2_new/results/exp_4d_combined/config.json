@@ -1,0 +1,31 @@
+{
+  "experiment_id": "exp_4d_combined",
+  "description": "Combined: tanh + amp penalty + freq weighted (RECOMMENDED)",
+  "model": {
+    "name": "tcn_constrained",
+    "filters": [
+      32,
+      32,
+      64
+    ],
+    "dilations": [
+      1,
+      2,
+      4
+    ],
+    "sequence_length": 200,
+    "dense_units": 32
+  },
+  "training": {
+    "epochs": 10,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-05,
+    "loss_type": "combined",
+    "loss_params": {
+      "lambda_amp": 0.01,
+      "alpha_engine": 0.85,
+      "engine_cutoff_hz": 400
+    }
+  },
+  "final_val_loss": 0.9997403562068939
+}

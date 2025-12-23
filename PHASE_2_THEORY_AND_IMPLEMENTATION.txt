@@ -1,0 +1,1064 @@
+# Phase 2 ANC Implementation: Theory and System Architecture
+
+**Date:** December 21, 2025
+**Project:** Active Noise Cancellation System for Vehicle Cabin
+**Phase:** 2 - Control Signal Learning with Secondary Path
+
+---
+
+## Table of Contents
+
+1. [ANC Theory Overview](#anc-theory-overview)
+2. [Phase 2 Approach](#phase-2-approach)
+3. [System Architecture](#system-architecture)
+4. [Training Pipeline](#training-pipeline)
+5. [File-by-File Breakdown](#file-by-file-breakdown)
+6. [Data Flow Diagram](#data-flow-diagram)
+7. [How Everything Works Together](#how-everything-works-together)
+
+---
+
+## ANC Theory Overview
+
+### What is Active Noise Cancellation?
+
+Active Noise Cancellation (ANC) uses **destructive interference** to reduce unwanted noise:
+
+1. **Noise source** generates unwanted sound (engine, road, AC)
+2. **ANC system** generates anti-noise (inverted waveform)
+3. **Superposition** at listener's ear: noise + anti-noise → silence
+
+**Key Principle:** Sound waves can cancel each other if they are:
+- Same amplitude
+- Opposite phase (180° phase shift)
+
+### Feedforward ANC Architecture
+
+Our system uses **feedforward** (not feedback) ANC:
+
+```
+┌─────────────┐
+│ Noise       │───┐
+│ Source      │   │
+│ (Engine)    │   │
+└─────────────┘   │
+                  │ Primary path (h_p)
+                  │ Noise travels to ear
+                  ↓
+              ┌───────────┐
+              │ Reference │
+              │ Microphone│ (closer to source)
+              └─────┬─────┘
+                    │
+                    │ Input: x[t]
+                    ↓
+              ┌───────────┐
+              │    ANC    │
+              │ Controller│ (TCN Model)
+              │  (learns) │
+              └─────┬─────┘
+                    │
+                    │ Output: u[t] (control signal)
+                    ↓
+              ┌───────────┐
+              │  Speaker  │
+              └─────┬─────┘
+                    │
+                    │ Secondary path (h_s)
+                    │ Anti-noise travels to ear
+                    ↓
+              ┌───────────┐         ┌───────────┐
+              │   Error   │←────────│  Noise    │
+              │ Microphone│         │  (direct) │
+              │ (at ear)  │         │  d[t]     │
+              └───────────┘         └───────────┘
+                    │
+                    │ Residual: e[t] = d[t] + y_ctrl[t]
+                    ↓
+              ┌───────────┐
+              │ MINIMIZE  │ ← Goal: Make this as small as possible
+              │   e[t]    │
+              └───────────┘
+```
+
+**Advantage of Feedforward:**
+- Reference mic detects noise BEFORE it reaches error mic
+- Allows time for processing and anti-noise generation
+- More effective for predictable noise (engine, road)
+
+**Challenge:**
+- Must account for **secondary path** (speaker → error mic)
+- Model needs to learn control signal u[t] that, after filtering through h_s, cancels d[t]
+
+---
+
+## Phase 2 Approach
+
+### Why Phase 2 is Different
+
+**Phase 1 attempted (FAILED):**
+- Predict error signal directly: ref → err
+- Invert and play through speaker
+- **Problem:** Ignored secondary path h_s
+- **Result:** -1.16 dB (amplification)
+
+**Phase 2 approach (CURRENT):**
+- Predict **control signal** u[t] instead
+- Include secondary path h_s in training
+- Model learns: "What should I output such that, after h_s, it cancels noise?"
+
+### Mathematical Formulation
+
+**Signal Flow:**
+```
+1. Reference mic:       x[t] = noise filtered by h_p (primary path)
+2. Error mic (noise):   d[t] = noise filtered by h_p (same, different location)
+3. Model predicts:      u[t] = TCN(x[t-L:t])  (based on reference window)
+4. Secondary path:      y_ctrl[t] = u[t] * h_s  (convolution)
+5. Residual:            e[t] = d[t] + y_ctrl[t]  (what listener hears)
+```
+
+**Training Objective:**
+```
+Minimize: Loss(e[t])
+
+Where: e[t] = d[t] + conv(u[t], h_s)
+```
+
+**Key Insight:**
+- Model DOES NOT predict d[t] directly
+- Model predicts u[t], which is then filtered by h_s
+- This accounts for speaker-to-ear acoustic path
+- Gradient flows through secondary path convolution
+
+### Why This Works
+
+**Traditional approach (FxLMS - Filtered-X LMS):**
+- Adaptive filter algorithm
+- Updates filter coefficients in real-time
+- Requires online computation of gradients
+
+**Our approach (TCN with Secondary Path):**
+- Train neural network offline on simulated data
+- Include h_s in forward pass during training
+- Once trained, model runs inference only (fast)
+- Better at handling non-linear effects and complex patterns
+
+---
+
+## System Architecture
+
+### Components
+
+#### 1. **Data Generation** (Simulation)
+- **Purpose:** Create realistic training scenarios
+- **Tool:** pyroomacoustics library
+- **Output:** Audio files + room impulse responses (RIRs)
+
+#### 2. **Dataset Builder** (Preprocessing)
+- **Purpose:** Convert audio files into training examples
+- **Input:** WAV files + RIRs
+- **Output:** (X, err, h_s) tuples for training
+
+#### 3. **Model** (TCN Controller)
+- **Purpose:** Learn mapping from reference window → control signal
+- **Architecture:** Temporal Convolutional Network (TCN)
+- **Output:** Single scalar u[t] per time step
+
+#### 4. **Loss Function** (Training Objective)
+- **Purpose:** Guide model to reduce noise at error mic
+- **Includes:** Secondary path convolution + penalties
+- **Variants:** MSE, amplitude penalty, frequency weighted, combined
+
+#### 5. **Training Loop** (Optimization)
+- **Purpose:** Minimize loss over training data
+- **Method:** Gradient descent (AdamW optimizer)
+- **Strategy:** Block-based with overlaps
+
+#### 6. **Evaluation** (Performance Measurement)
+- **Purpose:** Test model on unseen scenarios
+- **Metrics:** dB reduction (full-band, engine, road, cabin)
+- **Output:** Audio files for qualitative assessment
+
+### System Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     OFFLINE PHASE (Training)                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. SIMULATION (pyroomacoustics)                               │
+│     ├─ Define room geometry                                    │
+│     ├─ Place sources (noise) and mics (ref, err)              │
+│     ├─ Compute RIRs (h_p, h_s)                                │
+│     └─ Generate audio: ref.wav, err.wav                        │
+│                    ↓                                            │
+│  2. DATASET BUILDER                                            │
+│     ├─ Load audio files                                        │
+│     ├─ Create sliding windows: X[t-L:t] → err[t]             │
+│     └─ Output: (X, err, h_s) training tuples                  │
+│                    ↓                                            │
+│  3. TRAINING LOOP                                              │
+│     ├─ Forward pass: u = TCN(X)                               │
+│     ├─ Apply secondary: y_ctrl = conv(u, h_s)                │
+│     ├─ Compute residual: e = err + y_ctrl                     │
+│     ├─ Compute loss: L = f(e, u)  [configurable]             │
+│     └─ Backprop: Update TCN weights                           │
+│                    ↓                                            │
+│  4. SAVE MODEL                                                 │
+│     └─ Trained TCN weights: model.keras                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    INFERENCE PHASE (Deployment)                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Real-time Operation:                                          │
+│     Reference Mic → Window Buffer → TCN → u[t] → Speaker       │
+│                                                                 │
+│  (Not implemented in this project - simulation only)           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Training Pipeline
+
+### Step-by-Step Process
+
+#### Step 1: Data Generation
+**Script:** `simulation_setup_phase_2_curriculum.py`
+
+```
+Input: None (configuration parameters)
+Process:
+  1. Define room dimensions (random in ranges)
+  2. Place noise source (engine/road/ac)
+  3. Place reference mic (near source)
+  4. Place error mic (at driver's ear)
+  5. Place speaker (near error mic)
+  6. Simulate acoustic propagation
+  7. Record signals at both mics
+Output:
+  - train_scenario_NNN_ref.wav (reference mic)
+  - train_scenario_NNN_err.wav (error mic)
+  - train_scenario_NNN_rir_src_to_ref.npy (h_p to ref)
+  - train_scenario_NNN_rir_src_to_err.npy (h_p to err)
+  - train_scenario_NNN_rir_spk_to_err.npy (h_s - CRITICAL)
+```
+
+**Why Multiple RIRs:**
+- h_p (source→ref): Shows what reference mic receives
+- h_p (source→err): Shows what error mic would receive (noise)
+- h_s (speaker→err): **CRITICAL** - This is the secondary path we must account for
+
+#### Step 2: Dataset Preparation
+**Script:** `phase_2_new/utils/dataset_builder.py`
+
+```python
+def build_training_example(scenario_prefix, fs, window_length):
+    """
+    Convert one scenario into training data.
+
+    Input:
+        - scenario_prefix: "data/train/train_scenario_001"
+        - fs: 16000 Hz
+        - window_length: 200 samples
+
+    Process:
+        1. Load ref.wav → (T,) array
+        2. Load err.wav → (T,) array
+        3. Load h_s RIR → (L_s,) array
+        4. Create sliding windows:
+           For each t in [window_length, T]:
+               X[i] = ref[t-window_length : t]  (200 samples)
+               target: err[t]  (single sample)
+        5. Normalize audio to [-1, +1]
+
+    Output:
+        X: (T-W, W, 1) - Windows of reference signal
+        err: (T-W, 1) - Target error samples
+        h_s: (L_s,) - Secondary path impulse response
+    """
+```
+
+**Key Alignment:**
+```
+Time alignment for causality:
+
+t=0     t=1     t=2  ...  t=199   t=200   t=201
+│       │       │          │       │       │
+└───────┴───────┴──────────┴───────┘       │
+        Input window (200 samples)         │
+                                            ↓
+                                      Target: err[200]
+
+                                      Model predicts: u[200]
+```
+
+This ensures the model can only use PAST reference samples to predict CURRENT control signal (causal).
+
+#### Step 3: Model Architecture
+**Script:** `phase_2_new/models/tcn_constrained.py`
+
+```python
+def build_tcn_constrained(cfg):
+    """
+    Temporal Convolutional Network for control signal prediction.
+
+    Architecture:
+        Input: (200, 1) - Reference mic window
+          ↓
+        Conv1D(32, k=3, dilation=1, causal) + BN + ReLU
+          ↓
+        Conv1D(32, k=3, dilation=2, causal) + BN + ReLU
+          ↓
+        Conv1D(64, k=3, dilation=4, causal) + BN + ReLU
+          ↓
+        Flatten
+          ↓
+        Dense(32, ReLU)
+          ↓
+        Dense(1, tanh)  ← CRITICAL: Bounds output to [-1, +1]
+          ↓
+        Output: u[t] ∈ [-1, +1]
+
+    Why TCN:
+        - Causal convolutions: Only uses past information
+        - Dilations: Captures long-range dependencies
+        - Receptive field: dilation [1,2,4] → ~28 samples context
+
+    Why tanh:
+        - Prevents amplitude overshooting
+        - Physical constraint: Speaker has power limit
+        - Ensures u stays in normalized range
+    """
+```
+
+**Receptive Field Calculation:**
+```
+Layer 1: dilation=1, kernel=3 → sees 3 samples
+Layer 2: dilation=2, kernel=3 → sees 3 + 2*(3-1) = 7 samples
+Layer 3: dilation=4, kernel=3 → sees 7 + 4*(3-1) = 15 samples
+
+Total receptive field: ~15-28 samples (~1-2ms at 16kHz)
+```
+
+This is sufficient for low-frequency engine noise (50-400 Hz).
+
+#### Step 4: Loss Function
+**Script:** `phase_2_new/training/loss_functions.py`
+
+```python
+def compute_combined_loss(residual, u, engine_lpf_kernel,
+                         alpha_engine=0.85, lambda_amp=0.01):
+    """
+    Multi-objective loss function.
+
+    Components:
+        1. Frequency-weighted residual:
+           - Filter residual to engine band (50-400 Hz)
+           - Loss = 0.85 * MSE(residual_engine) + 0.15 * MSE(residual_full)
+           - Prioritizes project goal (engine noise reduction)
+
+        2. Amplitude penalty:
+           - Loss += 0.01 * MSE(u)
+           - Encourages efficient, small control signals
+           - Prevents overshooting
+
+    Total Loss:
+        L = [α * MSE(e_engine) + (1-α) * MSE(e_full)] + λ * MSE(u)
+
+    Where:
+        e = err + conv(u, h_s)  ← Secondary path included!
+        α = 0.85 (engine emphasis)
+        λ = 0.01 (amplitude penalty weight)
+    """
+```
+
+**Why This Loss:**
+1. **Frequency weighting:** Directly optimizes for project goal (≥15 dB engine)
+2. **Amplitude penalty:** Prevents model from using excessive energy
+3. **Secondary path:** Included in residual computation (e = err + conv(u, h_s))
+
+#### Step 5: Training Loop
+**Script:** `phase_2_new/training/train.py`
+
+```python
+def train_block_step(model, optimizer, X_ext, err_ext, sec_kernel,
+                    center_start, center_len, loss_fn, loss_params):
+    """
+    One gradient descent step on a time block.
+
+    Why Block-Based Training:
+        - Secondary path convolution requires context
+        - Can't shuffle individual samples (breaks temporal coupling)
+        - Use contiguous blocks with overlap = len(h_s) - 1
+
+    Process:
+        1. Forward pass: u_ext = model(X_ext)
+        2. Apply secondary path: y_ctrl = conv(u_ext, h_s)
+        3. Compute residual: residual = err_ext + y_ctrl
+        4. Extract valid region (center of block)
+        5. Compute loss: L = loss_fn(residual_center, u_center)
+        6. Backprop: Update model weights
+
+    Why Extended Region:
+        - Convolution at edges needs padding
+        - Use overlap = len(h_s) - 1 samples
+        - Ensures all center samples have correct convolution
+    """
+```
+
+**Block Training Visualization:**
+```
+Block 1:        [==================]
+                 ext  |  center  | ext
+
+Block 2:                    [==================]
+                             ext  |  center  | ext
+
+Overlap = len(h_s) - 1 to preserve convolution physics
+```
+
+#### Step 6: Training Execution
+**Command:** `python -m phase_2_new.training.train --config exp_4d_combined`
+
+```
+Process:
+    1. Load config (exp_4d_combined)
+    2. Create model (tcn_constrained with tanh)
+    3. Get loss function (combined)
+    4. Load training data (100 scenarios)
+    5. Load validation data (10 scenarios)
+    6. For each epoch (10 total):
+        a. For each scenario:
+            - For each block (4096 samples):
+                * Forward pass
+                * Compute loss
+                * Backprop
+        b. Evaluate on validation set
+        c. Save if best model
+    7. Save final model + metrics
+
+Output:
+    - phase_2_new/models/exp_4d_combined.keras
+    - phase_2_new/results/exp_4d_combined/config.json
+    - phase_2_new/results/exp_4d_combined/training_metrics.json
+```
+
+#### Step 7: Evaluation
+**Script:** `phase_2_new/testing/evaluate.py`
+
+```python
+def evaluate_model(model_path, val_dir):
+    """
+    Test model on validation scenarios.
+
+    Process:
+        1. Load trained model
+        2. For each validation scenario:
+            a. Load ref, err, h_s
+            b. Predict: u = model(ref_windows)
+            c. Apply secondary: y_ctrl = conv(u, h_s)
+            d. Compute residual: e = err + y_ctrl
+            e. Measure reduction:
+                - Full-band: MSE(err) vs MSE(e)
+                - Engine-band (50-400 Hz)
+                - Road-band (20-2000 Hz)
+                - Cabin-band (0-1000 Hz)
+        3. Aggregate metrics across all scenarios
+        4. Save audio files for listening tests
+
+    Output:
+        - Metrics: dB reduction per band
+        - Audio: before.wav, after.wav, antinoise.wav
+    """
+```
+
+---
+
+## File-by-File Breakdown
+
+### Data Generation
+
+#### `simulation_setup_phase_2_curriculum.py`
+**Role:** Generate training/validation scenarios
+**Inputs:** None (uses random parameters)
+**Outputs:**
+- `data/train/train_scenario_*.wav` (100 scenarios)
+- `data/train/train_scenario_*_rir_*.npy`
+- `data/val/val_scenario_*.wav` (10 scenarios)
+**Key Functions:**
+- `create_noise_signal()`: Generates engine/road/AC noise
+- `simulate_scenario()`: Runs pyroomacoustics simulation
+- `generate_dataset()`: Creates full dataset
+
+**How it works:**
+1. Randomly generates room dimensions (3.5-5m × 2.5-3.5m × 1.8-2.2m)
+2. Places noise source, mics, speaker
+3. Runs acoustic simulation
+4. Records audio at both mics
+5. Saves RIRs for training
+
+---
+
+### Dataset Utilities
+
+#### `phase_2_new/utils/dataset_builder.py`
+**Role:** Convert raw audio files into training examples
+**Inputs:** Scenario files (WAV + NPY)
+**Outputs:** (X, err, h_s) tuples
+**Key Functions:**
+- `list_scenarios()`: Find all scenarios in directory
+- `build_training_example()`: Convert one scenario to training data
+- `load_audio()`: Load and normalize WAV files
+
+**How it works:**
+1. Loads reference mic audio (ref.wav)
+2. Creates sliding windows (200 samples each)
+3. Loads corresponding error samples (err.wav)
+4. Loads secondary path RIR (h_s)
+5. Returns aligned (input, target, secondary_path) tuples
+
+**Critical Alignment:**
+```python
+# For time index t:
+X[i] = ref[t-200:t]  # Input: past 200 samples
+err[i] = err[t]       # Target: current sample
+# This ensures causality
+```
+
+---
+
+### Model Architectures
+
+#### `phase_2_new/models/tcn_baseline.py`
+**Role:** Original baseline model (FAILED)
+**Architecture:** 3 Conv1D layers → Dense → Dense(1)
+**Problem:** No activation on output → unbounded
+**Status:** Deprecated, kept for comparison
+
+#### `phase_2_new/models/tcn_constrained.py` ⭐
+**Role:** Fixed model with bounded output
+**Architecture:** 3 Conv1D layers → Dense → Dense(1, tanh)
+**Fix:** Added tanh activation → u ∈ [-1, +1]
+**Status:** CURRENT - used in exp_4a, 4b, 4c, 4d
+
+**Key Code:**
+```python
+# Line 84 - THE CRITICAL FIX:
+u = layers.Dense(1, activation="tanh", name="u")(x)
+```
+
+#### `phase_2_new/models/tcn_constrained_wider.py`
+**Role:** Enhanced capacity variant
+**Architecture:** 4 Conv1D layers [64,64,128,128] → Dense(64) → Dense(1, tanh)
+**Use:** For exp_4e if 4d succeeds
+**Status:** Available for testing
+
+#### `phase_2_new/models/model_factory.py`
+**Role:** Factory pattern for creating models
+**Purpose:** Unified interface for all model types
+**Key Function:**
+```python
+def create_model(cfg):
+    if cfg.model.model_name == "tcn_constrained":
+        return build_tcn_constrained(cfg.model)
+    elif cfg.model.model_name == "tcn_constrained_wider":
+        return build_tcn_constrained_wider(cfg.model)
+    # ... etc
+```
+
+---
+
+### Loss Functions
+
+#### `phase_2_new/training/loss_functions.py`
+**Role:** Implements all loss function variants
+**Key Functions:**
+
+1. **`build_engine_lpf()`**
+   - Creates FIR low-pass filter (400 Hz cutoff)
+   - 65 taps for speed (2x faster than 129)
+   - Used to isolate engine band
+
+2. **`compute_amplitude_penalty_loss()`**
+   - Loss = MSE(residual) + λ * MSE(u)
+   - λ = 0.01 (1% penalty)
+   - Encourages small control signals
+
+3. **`compute_frequency_weighted_loss()`**
+   - Loss = α * MSE(residual_engine) + (1-α) * MSE(residual_full)
+   - α = 0.85 (85% engine, 15% full-band)
+   - Prioritizes project goal
+
+4. **`compute_combined_loss()`** ⭐
+   - Combines both penalties
+   - RECOMMENDED approach
+   - Used in exp_4d and exp_4e
+
+5. **`get_loss_function()`**
+   - Factory function
+   - Returns (loss_fn, loss_params) based on config
+   - Called once at training start
+
+---
+
+### Training Infrastructure
+
+#### `phase_2_new/training/config.py`
+**Role:** Configuration management
+**Contains:**
+- `DataConfig`: Dataset paths
+- `ModelConfig`: Architecture parameters
+- `TrainingConfig`: Hyperparameters + loss settings
+- `ExperimentConfig`: Complete experiment definition
+
+**Key Configs:**
+- `get_baseline_config()`: Original (failed) baseline
+- `get_exp_4a_constrained()`: Tanh only
+- `get_exp_4b_amp_penalty()`: Tanh + amplitude
+- `get_exp_4c_freq_weighted()`: Tanh + frequency
+- `get_exp_4d_combined()`: All fixes ⭐
+- `get_exp_4e_combined_wider()`: Combined + bigger
+
+#### `phase_2_new/training/train.py`
+**Role:** Main training script
+**Key Functions:**
+
+1. **`make_secondary_kernel()`**
+   - Converts h_s array to TensorFlow kernel
+   - Reverses for convolution operation
+
+2. **`train_block_step()`**
+   - Single gradient descent step
+   - Includes secondary path convolution
+   - Uses configurable loss function
+
+3. **`evaluate_scenario()`**
+   - Inference on one scenario (no gradients)
+   - Used for validation during training
+
+4. **`load_dataset()`**
+   - Loads all scenarios from directory
+   - Returns list of (tag, X, err, h_s) tuples
+
+5. **`train()`**
+   - Main training loop
+   - Handles epochs, validation, early stopping
+   - Saves best model + metrics
+
+**Training Flow:**
+```python
+for epoch in range(epochs):
+    for scenario in train_data:
+        for block in scenario:
+            # Forward
+            u = model(X)
+            y_ctrl = conv(u, h_s)
+            residual = err + y_ctrl
+
+            # Loss
+            loss = loss_fn(residual, u)
+
+            # Backward
+            grads = gradient(loss, model.weights)
+            optimizer.apply(grads)
+
+    # Validate
+    val_loss = evaluate(model, val_data)
+    if val_loss < best:
+        save(model)
+```
+
+---
+
+### Testing/Evaluation
+
+#### `phase_2_new/testing/evaluate.py`
+**Role:** Evaluate trained models on validation set
+**Inputs:** Model path, validation directory
+**Outputs:** Metrics + audio files
+
+**Process:**
+1. Load model
+2. For each validation scenario:
+   - Predict control signal
+   - Apply secondary path
+   - Compute residual
+   - Measure dB reduction (4 bands)
+3. Aggregate statistics
+4. Save audio outputs
+
+**Metrics Computed:**
+- Full-band (20-8000 Hz)
+- Engine-band (50-400 Hz) ← PROJECT GOAL
+- Road-band (20-2000 Hz)
+- Cabin-band (0-1000 Hz)
+
+**Audio Outputs:**
+- `scenario_NNN_before.wav`: Original error signal
+- `scenario_NNN_after.wav`: Residual after ANC
+- `scenario_NNN_antinoise.wav`: Control signal through secondary path
+
+---
+
+## Data Flow Diagram
+
+### Training Data Flow
+
+```
+SIMULATION PHASE:
+┌──────────────────┐
+│ pyroomacoustics  │
+│ (simulation)     │
+└────────┬─────────┘
+         │
+         ├─→ train_scenario_NNN_ref.wav
+         ├─→ train_scenario_NNN_err.wav
+         └─→ train_scenario_NNN_rir_spk_to_err.npy (h_s)
+
+PREPROCESSING:
+         │
+         ↓
+┌──────────────────┐
+│ dataset_builder  │
+│  .py             │
+└────────┬─────────┘
+         │
+         ├─→ X: (T, 200, 1) reference windows
+         ├─→ err: (T, 1) error samples
+         └─→ h_s: (L_s,) secondary path RIR
+
+TRAINING:
+         │
+         ↓
+┌──────────────────────────────────────────┐
+│          Training Loop (train.py)        │
+│                                          │
+│  ┌────────────┐                         │
+│  │   Model    │                         │
+│  │   (TCN)    │                         │
+│  └─────┬──────┘                         │
+│        │                                │
+│        │ u[t] (control signal)          │
+│        ↓                                │
+│  ┌────────────┐                         │
+│  │ Conv with  │                         │
+│  │    h_s     │ (secondary path)        │
+│  └─────┬──────┘                         │
+│        │                                │
+│        │ y_ctrl[t]                      │
+│        ↓                                │
+│  ┌────────────┐                         │
+│  │ residual = │                         │
+│  │ err + y_ctrl│                        │
+│  └─────┬──────┘                         │
+│        │                                │
+│        │ e[t]                           │
+│        ↓                                │
+│  ┌────────────┐                         │
+│  │ Loss Func  │                         │
+│  │ (combined) │                         │
+│  └─────┬──────┘                         │
+│        │                                │
+│        │ L = f(e, u)                    │
+│        ↓                                │
+│  ┌────────────┐                         │
+│  │ Backprop   │                         │
+│  │ Update θ   │                         │
+│  └────────────┘                         │
+│                                          │
+└──────────────────────────────────────────┘
+         │
+         ↓
+┌──────────────────┐
+│ Trained Model    │
+│ .keras file      │
+└──────────────────┘
+```
+
+### Inference Data Flow
+
+```
+REAL-TIME OPERATION (Conceptual):
+
+Reference Mic → [Buffer] → [TCN Model] → u[t] → Speaker
+                 (200)       (trained)            ↓
+                                                  │
+                                           Secondary Path (h_s)
+                                                  │
+                                                  ↓
+Error Mic ←──────────────────────────── Anti-noise arrives
+   │                                            │
+   │                                            │
+   │                                            │
+   └────────────── SUPERPOSITION ───────────────┘
+                        │
+                        ↓
+                 Reduced Noise!
+```
+
+---
+
+## How Everything Works Together
+
+### Complete System Flow
+
+**1. DATA PREPARATION (One-time Setup)**
+
+```
+simulation_setup_phase_2_curriculum.py
+    ↓
+Generates 100 training + 10 validation scenarios
+    ↓
+Each scenario contains:
+    - ref.wav (reference mic)
+    - err.wav (error mic - what we want to reduce)
+    - h_s RIR (speaker→error mic - critical for training)
+```
+
+**2. TRAINING PROCESS**
+
+```
+python -m phase_2_new.training.train --config exp_4d_combined
+    │
+    ├─→ config.py: Load experiment configuration
+    │       ↓
+    │   ModelConfig: filters=[32,32,64], tanh output
+    │   TrainingConfig: loss_type="combined", α=0.85, λ=0.01
+    │   DataConfig: train_dir="data/train"
+    │
+    ├─→ model_factory.py: Create TCN model
+    │       ↓
+    │   build_tcn_constrained(cfg)
+    │       ↓
+    │   Returns compiled Keras model with tanh output
+    │
+    ├─→ loss_functions.py: Get loss function
+    │       ↓
+    │   get_loss_function(cfg) → (combined_loss, params)
+    │       ↓
+    │   Builds engine LPF, returns callable
+    │
+    ├─→ dataset_builder.py: Load training data
+    │       ↓
+    │   For each scenario file:
+    │       build_training_example() → (X, err, h_s)
+    │       ↓
+    │   Returns 100 tuples
+    │
+    └─→ train.py: Main training loop
+            ↓
+        For 10 epochs:
+            For each scenario:
+                For each block:
+                    1. u = model(X)
+                    2. y_ctrl = conv(u, h_s)
+                    3. residual = err + y_ctrl
+                    4. loss = combined_loss(residual, u)
+                    5. backprop()
+            Validate on 10 scenarios
+            Save if best
+            ↓
+        Save: exp_4d_combined.keras
+```
+
+**3. EVALUATION**
+
+```
+python -m phase_2_new.testing.evaluate --experiment exp_4d_combined
+    │
+    ├─→ Load trained model
+    │
+    ├─→ For each validation scenario:
+    │       1. Predict: u = model(ref_windows)
+    │       2. Apply: y_ctrl = conv(u, h_s)
+    │       3. Compute: residual = err + y_ctrl
+    │       4. Measure: dB = 10*log10(MSE_before/MSE_after)
+    │       5. Save audio files
+    │
+    └─→ Output:
+        - Metrics: Average dB reduction
+        - Audio: before/after/antinoise WAV files
+        - Plots: Frequency spectra
+```
+
+### Key Interactions
+
+#### Interaction 1: Model ↔ Loss Function
+```python
+# In train.py:
+loss_fn, loss_params = get_loss_function(cfg)  # From loss_functions.py
+
+# Later in training loop:
+loss, components = loss_fn(residual, u, **loss_params)
+# Loss function knows nothing about model
+# Model knows nothing about loss function
+# Clean separation of concerns
+```
+
+#### Interaction 2: Dataset Builder ↔ Training
+```python
+# dataset_builder.py prepares:
+X: (T, 200, 1)  # Reference windows
+err: (T, 1)      # Error samples
+h_s: (L_s,)      # Secondary path
+
+# train.py uses:
+u = model(X)                              # Predict control
+y_ctrl = conv(u, h_s)                    # Apply secondary path
+residual = err + y_ctrl                  # Compute residual
+# Dataset builder doesn't know about model
+# Training doesn't know how data was prepared
+```
+
+#### Interaction 3: Config ↔ All Components
+```python
+# config.py defines:
+cfg.model.filters = [32, 32, 64]
+cfg.model.model_name = "tcn_constrained"
+cfg.training.loss_type = "combined"
+cfg.training.alpha_engine = 0.85
+
+# model_factory.py reads:
+model = create_model(cfg)  # Uses cfg.model.*
+
+# train.py reads:
+loss_fn = get_loss_function(cfg)  # Uses cfg.training.*
+
+# Single source of truth
+# Easy to modify experiments
+```
+
+### Critical Dependencies
+
+**Must Run in Order:**
+
+1. **Data Generation** (once)
+   - `simulation_setup_phase_2_curriculum.py`
+   - Creates data/train/ and data/val/
+
+2. **Training** (per experiment)
+   - `python -m phase_2_new.training.train --config exp_4d_combined`
+   - Requires: Data from step 1
+   - Creates: Model file (.keras)
+
+3. **Evaluation** (per experiment)
+   - `python -m phase_2_new.testing.evaluate --experiment exp_4d_combined`
+   - Requires: Trained model from step 2
+   - Creates: Metrics and audio outputs
+
+**Cannot Skip Steps:**
+- Training requires data
+- Evaluation requires trained model
+- Secondary path (h_s) must be available for both training and inference
+
+---
+
+## Theory to Practice: Design Decisions
+
+### Decision 1: Why TCN (not RNN/LSTM)?
+
+**Advantages:**
+- **Causal by design**: Only uses past information (required for real-time)
+- **Parallelizable**: All time steps computed simultaneously (faster training)
+- **Long-range dependencies**: Dilations capture patterns across time
+- **Stable gradients**: No vanishing gradient problem like RNNs
+
+**Trade-off:**
+- More parameters than simple FIR filter
+- But learns non-linear patterns better
+
+### Decision 2: Why Include h_s in Training?
+
+**Critical Insight:**
+```
+If we train: err → anti-noise
+Then deploy: anti-noise → speaker → h_s → different signal!
+
+Solution: Train with h_s in the loop
+Loss sees: err + conv(u, h_s)
+Model learns: "What u produces correct anti-noise AFTER h_s?"
+```
+
+### Decision 3: Why Block-Based Training?
+
+**Problem with Sample-Shuffling:**
+```
+If we shuffle samples randomly:
+    X[i] → u[i]
+    X[j] → u[j]
+    ...
+Then compute: y_ctrl = conv([u[i], u[j], ...], h_s)
+Result: WRONG! Convolution assumes temporal continuity
+```
+
+**Solution:**
+```
+Use contiguous blocks:
+    X[0:4096] → u[0:4096]
+    y_ctrl = conv(u[0:4096], h_s)  ✓ Correct convolution
+```
+
+### Decision 4: Why Combined Loss?
+
+**Single-Objective (MSE) Problem:**
+- Model minimizes total error
+- No preference for which frequencies
+- No penalty for large control signals
+- Result: Suboptimal solution
+
+**Multi-Objective (Combined) Solution:**
+- Frequency weighting: Prioritize engine band (project goal)
+- Amplitude penalty: Encourage efficiency
+- Result: Better overall performance
+
+---
+
+## Summary
+
+### What Each Component Does
+
+| Component | Role | Input | Output |
+|-----------|------|-------|--------|
+| **simulation_setup_*.py** | Generate data | Config params | WAV + RIR files |
+| **dataset_builder.py** | Prepare training data | WAV + RIR | (X, err, h_s) tuples |
+| **tcn_constrained.py** | Model definition | Reference window | Control signal u[t] |
+| **loss_functions.py** | Training objective | (residual, u) | Loss value |
+| **config.py** | Configuration | None | Experiment configs |
+| **train.py** | Training loop | Data + config | Trained model |
+| **evaluate.py** | Performance test | Model + data | Metrics + audio |
+| **model_factory.py** | Model creation | Config | Keras model |
+
+### Key Principles
+
+1. **Causality**: Model only uses past information (window ends at t)
+2. **Secondary Path**: Always included in training (h_s in forward pass)
+3. **Block Training**: Preserves temporal structure for convolution
+4. **Multi-Objective**: Combined loss addresses all goals
+5. **Bounded Output**: Tanh prevents overshooting (physical constraint)
+
+### Expected Workflow
+
+```
+Generate Data (once)
+    ↓
+Configure Experiment (config.py)
+    ↓
+Train Model (train.py)
+    ↓
+Evaluate Results (evaluate.py)
+    ↓
+If good: Deploy
+If poor: Tune hyperparameters, repeat
+```
+
+---
+
+**Document Complete**
+**For detailed failure analysis, see:** PHASE_2_FAILURE_AND_FIX_DETAILED.md
+**For quick reference, see:** PHASE_2_FAILURE_AND_FIX_SUMMARY.md
