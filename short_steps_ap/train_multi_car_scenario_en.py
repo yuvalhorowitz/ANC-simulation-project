@@ -81,6 +81,10 @@ if __name__ == "__main__":
     # FIX: Assigning to 'history' variable correctly
     history = model.fit(X_train, -y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=1)
     
+    model.save('anc_car_tcn_model_v2912.keras')
+
+    print("✓ Model saved as 'anc_car_tcn_model_v1.keras'")
+
     # --- 5. Evaluation and Plotting (Training Performance) ---
     print("\n--- Visualizing Performance on Training Data (Seen Scenarios) ---")
     # We use a slice of the training data to see how well it learned
