@@ -1,45 +1,32 @@
 import tensorflow as tf
-import soundfile as sf
-import scipy.signal as signal
-import config
-import os
 
-class SecondaryPathLoss(tf.keras.losses.Loss):
-    def __init__(self, secondary_path_file):
-        super().__init__()
-        # 1. Load S(z) and format for Conv1D (Kernel_Size, In_Channels, Out_Channels)
-        s_z_raw, _ = sf.read(secondary_path_file)
-        self.s_z = tf.constant(s_z_raw.reshape(-1, 1, 1), dtype=tf.float32)
-        
-        # 2. Engine Band Priority Filter (Low-Pass 400Hz)
-        nyq = config.SAMPLE_RATE / 2
-        cutoff = config.LOW_PASS_CUTOFF / nyq
-        fir_coeff = signal.firwin(31, cutoff)
-        self.lpf = tf.constant(fir_coeff.reshape(-1, 1, 1), dtype=tf.float32)
+@tf.keras.utils.register_keras_serializable()
+class SISNRLoss(tf.keras.losses.Loss):
+    """
+    Scale-Invariant Source-to-Noise Ratio (SI-SNR) Loss.
+    Optimizes the ratio between the target signal and the noise/error.
+    """
+    def __init__(self, name="si_snr_loss"):
+        super().__init__(name=name)
 
-    def call(self, d_target, u_pred):
-        """
-        d_target: (Batch, 100, 1) - True noise at ear
-        u_pred:   (Batch, 100, 1) - Model's raw output
-        """
-        # --- PHYSICS SIMULATION ---
-        # Convolve Anti-Noise with Secondary Path (Speaker Effect)
-        # padding='SAME' ensures the output stays 100 samples
-        y_anti_noise = tf.nn.conv1d(u_pred, self.s_z, stride=1, padding='SAME')
+    def call(self, y_true, y_pred):
+        # 1. Zero-mean normalization
+        y_true = y_true - tf.reduce_mean(y_true, axis=1, keepdims=True)
+        y_pred = y_pred - tf.reduce_mean(y_pred, axis=1, keepdims=True)
+
+        # 2. Project predicted signal onto target (s_target = <y_pred, y_true> * y_true / ||y_true||^2)
+        dot_product = tf.reduce_sum(y_true * y_pred, axis=1, keepdims=True)
+        norm_true = tf.reduce_sum(y_true**2, axis=1, keepdims=True) + 1e-8
+        s_target = (dot_product * y_true) / norm_true
+
+        # 3. Calculate noise (e_noise = y_pred - s_target)
+        e_noise = y_pred - s_target
+
+        # 4. Calculate SI-SNR: 10 * log10( ||s_target||^2 / ||e_noise||^2 )
+        target_pow = tf.reduce_sum(s_target**2, axis=1) + 1e-8
+        noise_pow = tf.reduce_sum(e_noise**2, axis=1) + 1e-8
         
-        # --- RESIDUAL CALCULATION ---
-        # Error = Noise + Anti-Noise (destructive interference)
-        residual = d_target + y_anti_noise
+        si_snr = 10.0 * tf.math.log(target_pow / noise_pow) / tf.math.log(10.0)
         
-        # --- FREQUENCY WEIGHTING ---
-        # Apply LPF to focus training on Engine Drone
-        res_filtered = tf.nn.conv1d(residual, self.lpf, stride=1, padding='SAME')
-        
-        # --- MULTI-OBJECTIVE LOSS ---
-        # 1. Minimize Engine Noise
-        mse_loss = tf.reduce_mean(tf.square(res_filtered))
-        
-        # 2. Penalty for 'Screaming' (Control Signal Magnitude)
-        control_penalty = tf.reduce_mean(tf.square(u_pred))
-        
-        return mse_loss + (config.LAMBDA_CONTROL * control_penalty)
+        # We return negative SI-SNR because the optimizer minimizes the loss
+        return -tf.reduce_mean(si_snr)

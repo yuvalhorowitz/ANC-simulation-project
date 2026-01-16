@@ -3,6 +3,7 @@ import soundfile as sf
 import os
 import scipy.signal as signal
 import config
+import librosa
 
 class AudioDataset:
     def __init__(self):
@@ -54,6 +55,15 @@ class AudioDataset:
                 
                 X_buffer.append(window.reshape(-1, 1))
                 d_buffer.append(target)
+                # Extract Selective Features for each window
+                pitch, _ = librosa.piptrack(y=x_window, sr=config.SAMPLE_RATE)
+                avg_pitch = np.mean(pitch[pitch > 0]) if np.any(pitch > 0) else 0
+
+                # Amplitude Envelope (Root Mean Square)
+                envelope = np.sqrt(np.mean(x_window**2))
+
+                # Append these as secondary inputs to your X_windows
+                # This allows the TCN to 'know' if the current noise has the pitch of a siren
         
         X_arr = np.array(X_buffer, dtype=np.float32)
         d_arr = np.array(d_buffer, dtype=np.float32)
